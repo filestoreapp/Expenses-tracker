@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ledger — Expense Tracker</title>
+<meta name="theme-color" content="#0F1826">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">Ledger</div>
+  <div class="date" id="todayDate"></div>
+</div>
+
+<main>
+
+  <!-- DASHBOARD -->
+  <section class="page" id="page-dashboard">
+    <div class="hero">
+      <div class="label">Net worth</div>
+      <div class="amount" id="heroAmount">₹0</div>
+      <div class="sub">
+        <div>Liquid cash<span class="val" id="statCash">₹0</span></div>
+        <div>This month spent<span class="val" id="statMonth">₹0</span></div>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="stat-card">
+        <div class="t">Owed on cards</div>
+        <div class="v neg" id="statOwed">₹0</div>
+      </div>
+      <div class="stat-card">
+        <div class="t">Money lent out</div>
+        <div class="v pos" id="statLent">₹0</div>
+      </div>
+    </div>
+    <div class="section-head"><h2>Recent activity</h2><span class="link" onclick="setTab('transactions')">See all</span></div>
+    <div id="recentList" class="tape"></div>
+  </section>
+
+  <!-- ACCOUNTS -->
+  <section class="page hidden" id="page-accounts">
+    <div class="section-head"><h2>Your accounts</h2><span class="link" id="addAccountBtn">+ Add account</span></div>
+    <div id="accountsList"></div>
+  </section>
+
+  <!-- TRANSACTIONS -->
+  <section class="page hidden" id="page-transactions">
+    <div class="section-head">
+      <h2>Transactions</h2>
+      <select id="txFilter" style="width:auto;padding:6px 8px;font-size:12px;">
+        <option value="all">All types</option>
+        <option value="expense">Expenses</option>
+        <option value="income">Income</option>
+        <option value="transfer">Transfers</option>
+        <option value="lend">Lent</option>
+        <option value="purchase_for_other">Paid for others</option>
+        <option value="repay_in">Repayments</option>
+      </select>
+    </div>
+    <div id="txList" class="tape"></div>
+  </section>
+
+  <!-- LENDING -->
+  <section class="page hidden" id="page-lending">
+    <div class="hero">
+      <div class="label">Total outstanding</div>
+      <div class="amount" id="lendingTotal">₹0</div>
+    </div>
+    <div class="section-head"><h2>People who owe you</h2></div>
+    <div id="loansList" class="tape"></div>
+  </section>
+
+</main>
+
+<button class="fab" id="fab" aria-label="Add transaction">+</button>
+
+<div class="tabbar">
+  <button class="tab active" data-tab="dashboard"><span class="ic">🏠</span>Home</button>
+  <button class="tab" data-tab="accounts"><span class="ic">🏦</span>Accounts</button>
+  <button class="tab" data-tab="transactions"><span class="ic">📜</span>History</button>
+  <button class="tab" data-tab="lending"><span class="ic">🤝</span>Lending</button>
+</div>
+
+<div id="sheetRoot"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
