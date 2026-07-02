@@ -6,15 +6,35 @@
 <title>Ledger — Expense Tracker</title>
 <meta name="theme-color" content="#0F1826">
 <link rel="manifest" href="manifest.json">
-<link rel="icon" href="icons/icon-192.png">
-<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" href="data:image/png;base64,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">
+<link rel="apple-touch-icon" href="data:image/png;base64,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">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
+<!-- AUTH GATE: shown instead of the app when cloud login is required but not signed in -->
+<div id="authGate" class="hidden" style="position:fixed;inset:0;background:#0F1826;z-index:500;display:flex;align-items:center;justify-content:center;padding:24px;">
+  <div style="width:100%;max-width:340px;">
+    <div style="text-align:center;margin-bottom:28px;">
+      <div style="font-size:32px;">🔒</div>
+      <h2 style="color:#EDEFF4;margin-top:10px;">Ledger</h2>
+      <p style="color:#8C9AB3;font-size:13px;margin-top:4px;">Sign in to view your data</p>
+    </div>
+    <div class="field"><label>Email</label><input id="gateEmail" type="email" placeholder="you@example.com"></div>
+    <div class="field"><label>Password</label><input id="gatePw" type="password" placeholder="At least 6 characters"></div>
+    <button class="btn-primary" onclick="cloudSignIn(true)">Sign in</button>
+    <button class="btn-secondary" id="gateSignupBtn" onclick="cloudSignUp(true)">Create account</button>
+    <p id="gateError" style="color:var(--red);font-size:12px;margin-top:10px;text-align:center;"></p>
+  </div>
+</div>
+
+<div id="appRoot" class="hidden">
 <div class="topbar">
   <div class="brand">Ledger</div>
-  <div class="date" id="todayDate"></div>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span class="date" id="todayDate"></span>
+    <span id="syncBadge" class="badge" style="cursor:pointer;">Backup off</span>
+  </div>
 </div>
 
 <main>
@@ -88,7 +108,13 @@
 </div>
 
 <div id="sheetRoot"></div>
+</div><!-- /appRoot -->
 
+<!-- Cloud sync (Firebase) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

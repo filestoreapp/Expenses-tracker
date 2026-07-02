@@ -9,7 +9,10 @@ function load(){
   }catch(e){}
   return { accounts:[], transactions:[], loans:[] };
 }
-function save(){ localStorage.setItem(DB_KEY, JSON.stringify(db)); }
+function save(){
+  localStorage.setItem(DB_KEY, JSON.stringify(db));
+  cloudPush();
+}
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 function fmt(n){
@@ -565,6 +568,137 @@ function deleteLoan(id){
   toast('Loan record deleted');
 }
 
+/* ===================== CLOUD SYNC (Firebase) — mandatory login gate ===================== */
+let cloudEnabled = false;
+let auth = null, dbCloud = null, currentUser = null;
+let pushTimer = null;
+
+function initCloud(){
+  const cfg = window.FIREBASE_CONFIG;
+  if(!cfg || !cfg.apiKey){
+    // No Firebase configured: app runs local-only, no login wall.
+    setSyncBadge('Backup off', false);
+    showApp(true);
+    return;
+  }
+  cloudEnabled = true;
+  firebase.initializeApp(cfg);
+  auth = firebase.auth();
+  dbCloud = firebase.firestore();
+
+  auth.onAuthStateChanged(async (user)=>{
+    currentUser = user;
+    if(user){
+      showApp(true);
+      setSyncBadge('Syncing…', true);
+      await cloudPull();
+      setSyncBadge('Backed up ✓', true);
+    } else {
+      showApp(false); // lock the app behind sign-in
+    }
+  });
+}
+
+function showApp(show){
+  document.getElementById('appRoot').classList.toggle('hidden', !show);
+  document.getElementById('authGate').classList.toggle('hidden', show);
+}
+
+function setSyncBadge(text, signedIn){
+  const b = document.getElementById('syncBadge');
+  if(!b) return;
+  b.textContent = text;
+  b.className = 'badge ' + (signedIn ? 'closed' : 'open');
+}
+
+function docRef(){
+  return dbCloud.collection('users').doc(currentUser.uid).collection('ledger').doc('data');
+}
+
+async function cloudPull(){
+  try{
+    const snap = await docRef().get();
+    if(snap.exists){
+      const cloud = snap.data();
+      db = { accounts: cloud.accounts||[], transactions: cloud.transactions||[], loans: cloud.loans||[] };
+      localStorage.setItem(DB_KEY, JSON.stringify(db));
+      renderAll();
+    } else {
+      await cloudPush(true); // first sign-in on this account: push local data up
+    }
+  }catch(e){ console.error('Cloud pull failed', e); }
+}
+
+function cloudPush(immediate){
+  if(!cloudEnabled || !currentUser) return;
+  clearTimeout(pushTimer);
+  const doPush = async ()=>{
+    try{
+      setSyncBadge('Syncing…', true);
+      await docRef().set({ ...db, updatedAt: Date.now() });
+      setSyncBadge('Backed up ✓', true);
+    }catch(e){
+      console.error('Cloud push failed', e);
+      setSyncBadge('Backup failed — tap', true);
+    }
+  };
+  if(immediate) doPush(); else pushTimer = setTimeout(doPush, 1200);
+}
+
+function openSyncSheet(){
+  if(!cloudEnabled){
+    openSheet(`
+      <h3>Login not set up yet</h3>
+      <p style="color:var(--text-dim);font-size:14px;">
+        Add your Firebase project keys to <b>firebase-config.js</b> to require
+        sign-in before anyone can open this app, and to back up your data
+        automatically. See the README for the 5-minute setup.
+      </p>
+    `);
+    return;
+  }
+  openSheet(`
+    <h3>Account</h3>
+    <p style="color:var(--text-dim);font-size:14px;">Signed in as <b>${escapeHtml(currentUser.email)}</b>.</p>
+    <button class="btn-secondary" onclick="cloudSignOut()">Sign out</button>
+  `);
+}
+
+/* fromGate: true when called from the full-screen lock wall, false when
+   called from inside the app's own account sheet. */
+async function cloudSignIn(fromGate){
+  const emailEl = document.getElementById(fromGate ? 'gateEmail' : 'authEmail');
+  const pwEl = document.getElementById(fromGate ? 'gatePw' : 'authPw');
+  const email = emailEl.value.trim();
+  const pw = pwEl.value;
+  try{
+    await auth.signInWithEmailAndPassword(email, pw);
+    if(!fromGate) closeSheet();
+    setGateError('');
+    toast('Signed in');
+  }catch(e){ fromGate ? setGateError(e.message) : toast(e.message); }
+}
+async function cloudSignUp(fromGate){
+  const emailEl = document.getElementById(fromGate ? 'gateEmail' : 'authEmail');
+  const pwEl = document.getElementById(fromGate ? 'gatePw' : 'authPw');
+  const email = emailEl.value.trim();
+  const pw = pwEl.value;
+  try{
+    await auth.createUserWithEmailAndPassword(email, pw);
+    if(!fromGate) closeSheet();
+    setGateError('');
+    toast('Account created');
+  }catch(e){ fromGate ? setGateError(e.message) : toast(e.message); }
+}
+function setGateError(msg){
+  const el = document.getElementById('gateError');
+  if(el) el.textContent = msg;
+}
+function cloudSignOut(){
+  auth.signOut();
+  closeSheet();
+}
+
 /* ===================== INIT ===================== */
 window.addEventListener('DOMContentLoaded', ()=>{
   document.querySelectorAll('.tab').forEach(b=> b.onclick = ()=> setTab(b.dataset.tab));
@@ -572,7 +706,9 @@ window.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('addAccountBtn').onclick = openAddAccountSheet;
   document.getElementById('txFilter').onchange = renderTransactions;
   document.getElementById('todayDate').textContent = new Date().toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short'});
+  document.getElementById('syncBadge').onclick = openSyncSheet;
   setTab('dashboard');
+  initCloud();
 
   if('serviceWorker' in navigator){
     navigator.serviceWorker.register('service-worker.js').catch(()=>{});
