@@ -5,9 +5,13 @@ let db = load();
 function load(){
   try{
     const raw = localStorage.getItem(DB_KEY);
-    if(raw) return JSON.parse(raw);
+    if(raw){
+      const parsed = JSON.parse(raw);
+      if(!parsed.people) parsed.people = [];
+      return parsed;
+    }
   }catch(e){}
-  return { accounts:[], transactions:[], loans:[] };
+  return { accounts:[], transactions:[], loans:[], people:[] };
 }
 function save(){
   localStorage.setItem(DB_KEY, JSON.stringify(db));
@@ -40,6 +44,26 @@ const ACC_TYPES = [
 function accIcon(type){ return (ACC_TYPES.find(t=>t.k===type)||{}).icon || '💰'; }
 function accLabel(type){ return (ACC_TYPES.find(t=>t.k===type)||{}).label || type; }
 function getAcc(id){ return db.accounts.find(a=>a.id===id); }
+
+/** Looks up an existing person by name (case/space-insensitive); creates
+ *  one if not found. Returns the canonical stored name, so typos like
+ *  "arun " vs "Arun" always collapse to one person. */
+function getOrCreatePerson(rawName){
+  const name = (rawName||'').trim();
+  if(!name) return 'Unknown';
+  const key = personKey(name);
+  let p = db.people.find(x=>personKey(x.name)===key);
+  if(!p){
+    p = {id:uid(), name};
+    db.people.push(p);
+  }
+  return p.name;
+}
+function fillPeopleDatalist(){
+  const dl = document.getElementById('peopleDatalist');
+  if(!dl) return;
+  dl.innerHTML = db.people.map(p=>`<option value="${escapeHtml(p.name)}">`).join('');
+}
 
 /* ===================== DERIVED TOTALS ===================== */
 function totals(){
@@ -188,39 +212,161 @@ function renderTransactions(){
   });
 }
 
-/* ===================== RENDER: LENDING ===================== */
+/* ===================== RENDER: LENDING (People, like an accounts list) ===================== */
+function personKey(name){ return (name||'Unknown').trim().toLowerCase(); }
+
+function allPeopleGrouped(){
+  const map = {};
+  db.people.forEach(p=>{
+    map[personKey(p.name)] = { key: personKey(p.name), display: p.name, loans: [] };
+  });
+  db.loans.forEach(l=>{
+    const key = personKey(l.person);
+    if(!map[key]) map[key] = { key, display: l.person || 'Unknown', loans: [] };
+    map[key].loans.push(l);
+  });
+  return Object.values(map).map(g=>{
+    const totalPrincipal = g.loans.reduce((s,l)=>s+l.principal,0);
+    const totalRepaid = g.loans.reduce((s,l)=>s+l.repaid,0);
+    const outstanding = g.loans.filter(l=>!l.closed).reduce((s,l)=>s+(l.principal-l.repaid),0);
+    const allClosed = g.loans.length>0 && g.loans.every(l=>l.closed);
+    const lastDate = g.loans.reduce((max,l)=> l.date>max?l.date:max, '0000-00-00');
+    return { ...g, totalPrincipal, totalRepaid, outstanding, allClosed, hasLoans: g.loans.length>0, lastDate };
+  }).sort((a,b)=> (b.outstanding>0)-(a.outstanding>0) || b.lastDate.localeCompare(a.lastDate) || a.display.localeCompare(b.display));
+}
+
 function renderLending(){
   const wrap = document.getElementById('loansList');
   wrap.innerHTML='';
-  const open = db.loans.filter(l=>!l.closed);
-  const closed = db.loans.filter(l=>l.closed);
-  const totalOut = open.reduce((s,l)=>s+(l.principal-l.repaid),0);
+  const groups = allPeopleGrouped();
+  const totalOut = groups.reduce((s,g)=>s+g.outstanding,0);
   document.getElementById('lendingTotal').textContent = fmt(totalOut);
 
-  if(db.loans.length===0){
-    wrap.innerHTML = '<div class="empty">No lending records yet. Track money you lend to people here.</div>';
+  if(groups.length===0){
+    wrap.innerHTML = '<div class="empty">No people added yet. Tap "+ Add person" to start tracking who you lend to.</div>';
     return;
   }
-  [...open, ...closed].forEach(l=>{
-    const remaining = l.principal - l.repaid;
+  groups.forEach(g=>{
     const div = document.createElement('div');
     div.className='row';
+    const statusBadge = g.hasLoans ? `<span class="badge ${g.allClosed?'closed':'open'}">${g.allClosed?'Settled':'Open'}</span>` : `<span class="badge">No loans yet</span>`;
+    const subLine = g.hasLoans
+      ? `${g.loans.length} loan${g.loans.length>1?'s':''} · lent ${fmt(g.totalPrincipal)} total${g.totalRepaid>0?' · repaid '+fmt(g.totalRepaid):''}`
+      : 'Tap to record a lend for them';
     div.innerHTML = `
       <div class="icon">🤝</div>
       <div class="mid">
-        <div class="t1">${escapeHtml(l.person)} <span class="badge ${l.closed?'closed':'open'}">${l.closed?'Settled':'Open'}</span></div>
-        <div class="t2">Lent ${fmt(l.principal)} on ${fmtDate(l.date)} ${l.repaid>0?'· repaid '+fmt(l.repaid):''}</div>
+        <div class="t1">${escapeHtml(g.display)} ${statusBadge}</div>
+        <div class="t2">${subLine}</div>
       </div>
-      <div class="amt ${l.closed?'pos':'neg'}">${l.closed? 'Settled' : fmt(remaining)}</div>
+      <div class="amt ${g.allClosed || !g.hasLoans ?'pos':'neg'}">${g.hasLoans ? (g.allClosed?'Settled':fmt(g.outstanding)) : ''}</div>
     `;
-    div.onclick = ()=> openLoanDetail(l.id);
+    div.onclick = ()=> openPersonDetail(g.key);
     wrap.appendChild(div);
   });
+}
+
+function openAddPersonSheet(){
+  openSheet(`
+    <h3>Add person</h3>
+    <div class="field"><label>Name</label><input id="personName" placeholder="e.g. Arun"></div>
+    <button class="btn-primary" onclick="savePerson()">Save person</button>
+  `);
+}
+function savePerson(){
+  const name = document.getElementById('personName').value.trim();
+  if(!name){ toast('Enter a name'); return; }
+  getOrCreatePerson(name);
+  save(); closeSheet(); renderAll();
+  toast('Person added');
+}
+
+function openPersonDetail(key){
+  const g = allPeopleGrouped().find(x=>x.key===key);
+  if(!g) return;
+  const history = db.transactions
+    .filter(t=> (t.type==='lend'||t.type==='purchase_for_other'||t.type==='repay_in') && personKey(t.person)===key)
+    .sort((a,b)=> b.date.localeCompare(a.date) || b.createdAt-a.createdAt);
+  const openLoans = g.loans.filter(l=>!l.closed);
+
+  openSheet(`
+    <h3>🤝 ${escapeHtml(g.display)}</h3>
+    <div class="hero" style="padding:16px;margin-bottom:14px;">
+      <div class="label">Outstanding</div>
+      <div class="amount">${g.hasLoans ? (g.allClosed?'Settled ✅':fmt(g.outstanding)) : fmt(0)}</div>
+      <div class="sub">
+        <div>Total lent<span class="val">${fmt(g.totalPrincipal)}</span></div>
+        <div>Total repaid<span class="val">${fmt(g.totalRepaid)}</span></div>
+      </div>
+    </div>
+
+    ${openLoans.length>0 ? `
+    <div class="field"><label>Record a repayment</label><input id="personRepayAmt" type="number" placeholder="Amount received"></div>
+    <div class="field"><label>Into account</label><select class="acc-select" id="personRepayAcc"></select></div>
+    <div class="field"><label>Applies to which loan</label>
+      <select id="personRepayLoan">
+        ${openLoans.map(l=>`<option value="${l.id}">${fmtDate(l.date)} · ${fmt(l.principal-l.repaid)} remaining</option>`).join('')}
+      </select>
+    </div>
+    <button class="btn-primary" onclick="recordPersonRepay('${key}')">Record repayment</button>
+    ` : ''}
+
+    <div class="section-head" style="margin-top:18px;"><h2>History</h2></div>
+    <div class="tape" id="personHistoryList"></div>
+
+    <div class="section-head" style="margin-top:18px;"><h2>Manage contact</h2></div>
+    <div class="field"><label>Rename</label><input id="personRenameInput" value="${escapeHtml(g.display)}"></div>
+    <button class="btn-secondary" onclick="renamePerson('${key}')">Save name</button>
+    ${!g.hasLoans ? `<button class="btn-secondary btn-danger" onclick="removePersonContact('${key}')">Remove person</button>` : ''}
+  `);
+  fillAccountSelects();
+
+  const histWrap = document.getElementById('personHistoryList');
+  if(history.length===0){
+    histWrap.innerHTML = '<div class="empty">No transactions recorded yet.</div>';
+  } else {
+    history.forEach(tx=> histWrap.appendChild(txRow(tx)));
+  }
+}
+function recordPersonRepay(key){
+  const amount = parseFloat(document.getElementById('personRepayAmt').value);
+  const accountId = document.getElementById('personRepayAcc').value;
+  const loanId = document.getElementById('personRepayLoan').value;
+  if(!amount || amount<=0){ toast('Enter a valid amount'); return; }
+  const l = db.loans.find(x=>x.id===loanId);
+  if(!l) return;
+  getAcc(accountId).balance += amount;
+  l.repaid += amount;
+  if(l.repaid >= l.principal) l.closed = true;
+  db.transactions.push({id:uid(), type:'repay_in', amount, date:todayISO(), note:'', accountId, person:l.person, loanId:l.id, createdAt:Date.now()});
+  save(); closeSheet(); renderAll();
+  toast('Repayment recorded');
+  openPersonDetail(key);
+}
+function renamePerson(oldKey){
+  const newName = document.getElementById('personRenameInput').value.trim();
+  if(!newName){ toast('Enter a name'); return; }
+  const newKey = personKey(newName);
+  // Update (or create) the person's directory entry
+  let p = db.people.find(x=>personKey(x.name)===oldKey);
+  if(p) p.name = newName; else db.people.push({id:uid(), name:newName});
+  // Cascade the rename across historical loans and transactions
+  db.loans.forEach(l=>{ if(personKey(l.person)===oldKey) l.person = newName; });
+  db.transactions.forEach(t=>{ if(t.person && personKey(t.person)===oldKey) t.person = newName; });
+  save(); closeSheet(); renderAll();
+  toast('Renamed');
+  openPersonDetail(newKey);
+}
+function removePersonContact(key){
+  db.people = db.people.filter(p=>personKey(p.name)!==key);
+  save(); closeSheet(); renderAll();
+  toast('Person removed');
 }
 
 /* ===================== RENDER ALL ===================== */
 function renderAll(){
   fillAccountSelects();
+  fillPeopleDatalist();
   if(activeTab==='dashboard') renderDashboard();
   if(activeTab==='accounts') renderAccounts();
   if(activeTab==='transactions') renderTransactions();
@@ -380,11 +526,11 @@ function renderTxForm(type){
   } else if(type==='lend'){
     extra = `
       <div class="field"><label>From account</label>${accOptions()}</div>
-      <div class="field"><label>Person's name</label><input id="txPerson" placeholder="Who did you lend to?"></div>`;
+      <div class="field"><label>Person's name</label><input id="txPerson" list="peopleDatalist" placeholder="Who did you lend to?"></div>`;
   } else if(type==='purchase_for_other'){
     extra = `
       <div class="field"><label>Card / account used</label>${accOptions()}</div>
-      <div class="field"><label>Person's name</label><input id="txPerson" placeholder="Who is this for?"></div>`;
+      <div class="field"><label>Person's name</label><input id="txPerson" list="peopleDatalist" placeholder="Who is this for?"></div>`;
   } else if(type==='repay_in'){
     const openLoans = db.loans.filter(l=>!l.closed);
     extra = `
@@ -394,7 +540,7 @@ function renderTxForm(type){
         ${openLoans.map(l=>`<option value="${l.id}">${escapeHtml(l.person)} (owes ${fmt(l.principal-l.repaid)})</option>`).join('')}
         </select>
       </div>
-      <div class="field hidden" id="manualPersonField"><label>Person's name</label><input id="txPerson" placeholder="Name"></div>`;
+      <div class="field hidden" id="manualPersonField"><label>Person's name</label><input id="txPerson" list="peopleDatalist" placeholder="Name"></div>`;
   }
   body.innerHTML = `
     <div class="field"><label>Amount</label><input id="txAmount" type="number" placeholder="0"></div>
@@ -438,7 +584,7 @@ function saveTx(type){
     db.transactions.push({...base, accountId, toAccountId});
   } else if(type==='lend'){
     const accountId = document.getElementById('txAccount').value;
-    const person = document.getElementById('txPerson').value.trim() || 'Unknown';
+    const person = getOrCreatePerson(document.getElementById('txPerson').value);
     const acc = getAcc(accountId);
     if(acc.type==='credit') acc.balance += amount; else acc.balance -= amount;
     const loanId = uid();
@@ -446,7 +592,7 @@ function saveTx(type){
     db.transactions.push({...base, accountId, person, loanId});
   } else if(type==='purchase_for_other'){
     const accountId = document.getElementById('txAccount').value;
-    const person = document.getElementById('txPerson').value.trim() || 'Unknown';
+    const person = getOrCreatePerson(document.getElementById('txPerson').value);
     const acc = getAcc(accountId);
     if(acc.type==='credit') acc.balance += amount; else acc.balance -= amount;
     const loanId = uid();
@@ -463,7 +609,8 @@ function saveTx(type){
       person = loan.person;
       if(loan.repaid >= loan.principal) loan.closed = true;
     } else {
-      person = document.getElementById('txPerson') ? document.getElementById('txPerson').value.trim() : '';
+      const typed = document.getElementById('txPerson') ? document.getElementById('txPerson').value : '';
+      person = typed ? getOrCreatePerson(typed) : '';
     }
     db.transactions.push({...base, accountId, person, loanId: loanId||null});
   }
@@ -581,22 +728,36 @@ function initCloud(){
     showApp(true);
     return;
   }
-  cloudEnabled = true;
-  firebase.initializeApp(cfg);
-  auth = firebase.auth();
-  dbCloud = firebase.firestore();
+  if(typeof firebase === 'undefined'){
+    // Firebase SDK scripts failed to load (offline / blocked / CDN issue).
+    // Fail open to local-only mode rather than leaving a blank screen.
+    console.error('Firebase SDK did not load; running in local-only mode.');
+    setSyncBadge('Backup unavailable', false);
+    showApp(true);
+    return;
+  }
+  try{
+    cloudEnabled = true;
+    firebase.initializeApp(cfg);
+    auth = firebase.auth();
+    dbCloud = firebase.firestore();
 
-  auth.onAuthStateChanged(async (user)=>{
-    currentUser = user;
-    if(user){
-      showApp(true);
-      setSyncBadge('Syncing…', true);
-      await cloudPull();
-      setSyncBadge('Backed up ✓', true);
-    } else {
-      showApp(false); // lock the app behind sign-in
-    }
-  });
+    auth.onAuthStateChanged(async (user)=>{
+      currentUser = user;
+      if(user){
+        showApp(true);
+        setSyncBadge('Syncing…', true);
+        await cloudPull();
+        setSyncBadge('Backed up ✓', true);
+      } else {
+        showApp(false); // lock the app behind sign-in
+      }
+    });
+  }catch(e){
+    console.error('Firebase init failed', e);
+    setSyncBadge('Backup unavailable', false);
+    showApp(true);
+  }
 }
 
 function showApp(show){
@@ -620,7 +781,7 @@ async function cloudPull(){
     const snap = await docRef().get();
     if(snap.exists){
       const cloud = snap.data();
-      db = { accounts: cloud.accounts||[], transactions: cloud.transactions||[], loans: cloud.loans||[] };
+      db = { accounts: cloud.accounts||[], transactions: cloud.transactions||[], loans: cloud.loans||[], people: cloud.people||[] };
       localStorage.setItem(DB_KEY, JSON.stringify(db));
       renderAll();
     } else {
@@ -704,11 +865,24 @@ window.addEventListener('DOMContentLoaded', ()=>{
   document.querySelectorAll('.tab').forEach(b=> b.onclick = ()=> setTab(b.dataset.tab));
   document.getElementById('fab').onclick = openAddTxSheet;
   document.getElementById('addAccountBtn').onclick = openAddAccountSheet;
+  document.getElementById('addPersonBtn').onclick = openAddPersonSheet;
   document.getElementById('txFilter').onchange = renderTransactions;
   document.getElementById('todayDate').textContent = new Date().toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short'});
   document.getElementById('syncBadge').onclick = openSyncSheet;
   setTab('dashboard');
   initCloud();
+  // Safety net: if nothing has shown the app or the gate within 6s
+  // (e.g. Firebase hanging on a slow/blocked connection), fail open
+  // to local-only mode so the person is never stuck on a blank screen.
+  setTimeout(()=>{
+    const root = document.getElementById('appRoot');
+    const gate = document.getElementById('authGate');
+    if(root.classList.contains('hidden') && gate.classList.contains('hidden')){
+      console.warn('Cloud sign-in check timed out; opening app in local-only mode.');
+      setSyncBadge('Backup unavailable', false);
+      showApp(true);
+    }
+  }, 6000);
 
   if('serviceWorker' in navigator){
     navigator.serviceWorker.register('service-worker.js').catch(()=>{});
