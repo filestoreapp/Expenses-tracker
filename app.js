@@ -45,6 +45,8 @@ function accIcon(type){ return (ACC_TYPES.find(t=>t.k===type)||{}).icon || '💰
 function accLabel(type){ return (ACC_TYPES.find(t=>t.k===type)||{}).label || type; }
 function getAcc(id){ return db.accounts.find(a=>a.id===id); }
 
+function personKey(name){ return (name||'Unknown').trim().toLowerCase(); }
+
 function getOrCreatePerson(rawName){
   const name = (rawName||'').trim();
   if(!name) return 'Unknown';
@@ -210,8 +212,6 @@ function renderTransactions(){
 }
 
 /* ===================== RENDER: LENDING (People, like an accounts list) ===================== */
-function personKey(name){ return (name||'Unknown').trim().toLowerCase(); }
-
 function allPeopleGrouped(){
   const map = {};
   db.people.forEach(p=>{
@@ -356,7 +356,6 @@ function recordPersonRepay(key){
   if(acc.type==='credit') acc.balance -= amount;
   else acc.balance += amount;
   l.repaid += amount;
-  // No auto-close
   db.transactions.push({id:uid(), type:'repay_in', amount, date:todayISO(), note:'', accountId, person:l.person, loanId:l.id, createdAt:Date.now()});
   save(); closeSheet(); renderAll();
   toast('Repayment recorded');
@@ -508,6 +507,77 @@ function deleteAccount(id){
   toast('Account deleted');
 }
 
+/* ===================== SMART REPAYMENT DISTRIBUTOR ===================== */
+function applyRepaymentToPerson(rawPerson, amount, accountId, date, note) {
+  const person = getOrCreatePerson(rawPerson);
+  const personKeyVal = personKey(person);
+
+  // Get all open loans (not fully repaid, not marked closed) for this person
+  let openLoans = db.loans.filter(l => 
+    personKey(l.person) === personKeyVal && 
+    !l.closed && 
+    l.repaid < l.principal
+  );
+  // Sort oldest first (FIFO)
+  openLoans.sort((a, b) => a.date.localeCompare(b.date));
+
+  let remaining = amount;
+
+  for (let loan of openLoans) {
+    let outstanding = loan.principal - loan.repaid;
+    if (remaining <= outstanding) {
+      loan.repaid += remaining;
+      if (loan.repaid >= loan.principal) loan.closed = true;
+      remaining = 0;
+      break;
+    } else {
+      remaining -= outstanding;
+      loan.repaid = loan.principal;
+      loan.closed = true;
+    }
+  }
+
+  // If there's still remaining money after clearing all open loans
+  if (remaining > 0) {
+    // Apply excess to the most recent loan (to create a negative balance / debt)
+    let targetLoan = null;
+    // Get all loans for this person sorted by date
+    let allLoans = db.loans.filter(l => personKey(l.person) === personKeyVal);
+    allLoans.sort((a, b) => a.date.localeCompare(b.date));
+    
+    if (allLoans.length > 0) {
+      targetLoan = allLoans[allLoans.length - 1]; // most recent
+      targetLoan.repaid += remaining;
+      targetLoan.closed = false; // Keep it open to show debt
+    } else {
+      // No loans at all (rare case), create a dummy loan to hold the debt
+      targetLoan = {
+        id: uid(),
+        person: person,
+        principal: 0,
+        repaid: remaining,
+        date: date,
+        notes: note || 'Over-repayment (debt)',
+        closed: false
+      };
+      db.loans.push(targetLoan);
+    }
+  }
+
+  // Record the transaction
+  db.transactions.push({
+    id: uid(),
+    type: 'repay_in',
+    amount: amount,
+    date: date,
+    note: note || '',
+    accountId: accountId,
+    person: person,
+    loanId: null,
+    createdAt: Date.now()
+  });
+}
+
 /* ---------- ADD TRANSACTION ---------- */
 const TX_TYPES = [
   {k:'expense', label:'Expense'},
@@ -590,81 +660,16 @@ function renderTxForm(type){
   fillAccountSelects();
   if(type==='repay_in'){
     const linkSel = document.getElementById('txLoanLink');
-    linkSel.onchange = ()=>{
-      document.getElementById('manualPersonField').classList.toggle('hidden', !!linkSel.value);
-    };
-  }
-}
-
-/* ===================== NEW: Smart repayment distributor ===================== */
-function applyRepaymentToPerson(rawPerson, amount, accountId, date, note) {
-  const person = getOrCreatePerson(rawPerson);
-  const personKeyVal = personKey(person);
-
-  // Get all open loans (not fully repaid, not marked closed) for this person
-  let openLoans = db.loans.filter(l => 
-    personKey(l.person) === personKeyVal && 
-    !l.closed && 
-    l.repaid < l.principal
-  );
-  // Sort oldest first (FIFO)
-  openLoans.sort((a, b) => a.date.localeCompare(b.date));
-
-  let remaining = amount;
-
-  for (let loan of openLoans) {
-    let outstanding = loan.principal - loan.repaid;
-    if (remaining <= outstanding) {
-      loan.repaid += remaining;
-      if (loan.repaid >= loan.principal) loan.closed = true;
-      remaining = 0;
-      break;
-    } else {
-      remaining -= outstanding;
-      loan.repaid = loan.principal;
-      loan.closed = true;
-    }
-  }
-
-  // If there's still remaining money after clearing all open loans
-  if (remaining > 0) {
-    // Apply excess to the most recent loan (to create a negative balance / debt)
-    // If there are loans, pick the last one in the sorted list (which is the most recent)
-    let targetLoan = null;
-    if (openLoans.length > 0) {
-      targetLoan = openLoans[openLoans.length - 1];
-      targetLoan.repaid += remaining;
-      targetLoan.closed = false; // Keep it open to show debt
-    } else {
-      // No loans at all (rare case), create a dummy loan to hold the debt
-      targetLoan = {
-        id: uid(),
-        person: person,
-        principal: 0,
-        repaid: remaining,
-        date: date,
-        notes: note || 'Over-repayment (debt)',
-        closed: false
+    if(linkSel){
+      linkSel.onchange = ()=>{
+        const manualField = document.getElementById('manualPersonField');
+        if(manualField) manualField.classList.toggle('hidden', !!linkSel.value);
       };
-      db.loans.push(targetLoan);
     }
   }
-
-  // Record the transaction
-  db.transactions.push({
-    id: uid(),
-    type: 'repay_in',
-    amount: amount,
-    date: date,
-    note: note || '',
-    accountId: accountId,
-    person: person,
-    loanId: null,
-    createdAt: Date.now()
-  });
 }
 
-/* ===================== SAVE TX (updated repay_in case) ===================== */
+/* ===================== SAVE TX ===================== */
 function saveTx(type){
   const amount = parseFloat(document.getElementById('txAmount').value);
   if(!amount || amount<=0){ toast('Enter a valid amount'); return; }
@@ -688,323 +693,4 @@ function saveTx(type){
     const accountId = document.getElementById('txAccount').value;
     const toAccountId = document.getElementById('txToAccount').value;
     if(accountId===toAccountId){ toast('Choose two different accounts'); return; }
-    const from = getAcc(accountId), to = getAcc(toAccountId);
-    if(from.type==='credit') from.balance += amount;
-    else from.balance -= amount;
-    if(to.type==='credit') to.balance -= amount;
-    else to.balance += amount;
-    db.transactions.push({...base, accountId, toAccountId});
-  } else if(type==='lend'){
-    const accountId = document.getElementById('txAccount').value;
-    const person = getOrCreatePerson(document.getElementById('txPerson').value);
-    const acc = getAcc(accountId);
-    if(acc.type==='credit') acc.balance += amount; else acc.balance -= amount;
-    const loanId = uid();
-    db.loans.push({id:loanId, person, principal:amount, repaid:0, date, notes:note, closed:false});
-    db.transactions.push({...base, accountId, person, loanId});
-  } else if(type==='purchase_for_other'){
-    const accountId = document.getElementById('txAccount').value;
-    const person = getOrCreatePerson(document.getElementById('txPerson').value);
-    const acc = getAcc(accountId);
-    if(acc.type==='credit') acc.balance += amount; else acc.balance -= amount;
-    const loanId = uid();
-    db.loans.push({id:loanId, person, principal:amount, repaid:0, date, notes:'Paid on their behalf: '+note, closed:false});
-    db.transactions.push({...base, accountId, person, loanId});
-  } else if(type==='repay_in'){
-    const accountId = document.getElementById('txAccount').value;
-    const loanId = document.getElementById('txLoanLink').value;
-    const acc = getAcc(accountId);
-    if(acc.type==='credit') acc.balance -= amount;
-    else acc.balance += amount;
-
-    if(loanId){
-      // Linked to a specific loan – simple update
-      const loan = db.loans.find(l=>l.id===loanId);
-      if(loan){
-        loan.repaid += amount;
-        // No auto-close
-        db.transactions.push({...base, accountId, person:loan.person, loanId});
-      } else {
-        toast('Loan not found');
-        return;
-      }
-    } else {
-      // General repayment – use the smart distributor
-      const personName = document.getElementById('txPerson') ? document.getElementById('txPerson').value.trim() : '';
-      if(!personName){ toast('Enter the person\'s name'); return; }
-      applyRepaymentToPerson(personName, amount, accountId, date, note);
-      // The transaction is already pushed inside applyRepaymentToPerson, so we skip pushing again.
-      save(); closeSheet(); renderAll();
-      toast('Saved');
-      return;
-    }
-  }
-  save(); closeSheet(); renderAll();
-  toast('Saved');
-}
-
-function openTxDetail(id){
-  const tx = db.transactions.find(t=>t.id===id);
-  if(!tx) return;
-  openSheet(`
-    <h3>${escapeHtml(txTitle(tx))}</h3>
-    <p style="color:var(--text-dim);font-size:13px;margin:0 0 14px;">${fmtDate(tx.date)} · ${escapeHtml(txSub(tx))}</p>
-    <div class="hero" style="padding:16px;margin-bottom:14px;">
-      <div class="amount">${fmt(tx.amount)}</div>
-    </div>
-    ${tx.note ? `<p style="font-size:14px;color:var(--text-dim);">Note: ${escapeHtml(tx.note)}</p>` : ''}
-    <button class="btn-secondary btn-danger" onclick="deleteTx('${id}')">Delete transaction</button>
-  `);
-}
-function deleteTx(id){
-  const tx = db.transactions.find(t=>t.id===id);
-  if(!tx) return;
-  // reverse the balance effect (with corrected logic)
-  if(tx.type==='expense'){
-    const acc = getAcc(tx.accountId);
-    if(acc) acc.type==='credit' ? acc.balance-=tx.amount : acc.balance+=tx.amount;
-  } else if(tx.type==='income'){
-    const acc = getAcc(tx.accountId);
-    if(acc) acc.type==='credit' ? acc.balance+=tx.amount : acc.balance-=tx.amount;
-  } else if(tx.type==='transfer'){
-    const from = getAcc(tx.accountId), to = getAcc(tx.toAccountId);
-    if(from) from.type==='credit' ? from.balance-=tx.amount : from.balance+=tx.amount;
-    if(to) to.type==='credit' ? to.balance+=tx.amount : to.balance-=tx.amount;
-  } else if(tx.type==='lend' || tx.type==='purchase_for_other'){
-    const acc = getAcc(tx.accountId);
-    if(acc) acc.type==='credit' ? acc.balance-=tx.amount : acc.balance+=tx.amount;
-    if(tx.loanId){
-      db.loans = db.loans.filter(l=>l.id!==tx.loanId);
-    }
-  } else if(tx.type==='repay_in'){
-    const acc = getAcc(tx.accountId);
-    if(acc) acc.type==='credit' ? acc.balance+=tx.amount : acc.balance-=tx.amount;
-    if(tx.loanId){
-      const loan = db.loans.find(l=>l.id===tx.loanId);
-      if(loan){ loan.repaid -= tx.amount; /* no auto-close */ }
-    }
-  }
-  db.transactions = db.transactions.filter(t=>t.id!==id);
-  save(); closeSheet(); renderAll();
-  toast('Transaction deleted');
-}
-
-/* ---------- LOAN DETAIL ---------- */
-function openLoanDetail(id){
-  const l = db.loans.find(x=>x.id===id);
-  if(!l) return;
-  const remaining = l.principal - l.repaid;
-  const isDebt = remaining < 0;
-  openSheet(`
-    <h3>🤝 ${escapeHtml(l.person)}</h3>
-    <div class="hero" style="padding:16px;margin-bottom:14px;">
-      <div class="label">${isDebt ? 'You owe' : 'Outstanding'}</div>
-      <div class="amount ${isDebt?'debt':''}">${l.closed?'Settled ✅': (isDebt ? fmt(-remaining) : fmt(remaining))}</div>
-      <div class="sub">
-        <div>Lent<span class="val">${fmt(l.principal)}</span></div>
-        <div>Repaid<span class="val">${fmt(l.repaid)}</span></div>
-        <div>Date<span class="val">${fmtDate(l.date)}</span></div>
-      </div>
-    </div>
-    ${!l.closed ? `
-    <div class="field"><label>Record a repayment</label><input id="loanRepayAmt" type="number" placeholder="Amount received"></div>
-    <div class="field"><label>Into account</label><select class="acc-select" id="loanRepayAcc"></select></div>
-    <button class="btn-primary" onclick="recordLoanRepay('${id}')">Record repayment</button>
-    <button class="btn-secondary" onclick="markLoanClosed('${id}')">Mark fully settled</button>
-    ` : ''}
-    <button class="btn-secondary btn-danger" onclick="deleteLoan('${id}')">Delete record</button>
-  `);
-  fillAccountSelects();
-}
-function recordLoanRepay(id){
-  const l = db.loans.find(x=>x.id===id);
-  const amount = parseFloat(document.getElementById('loanRepayAmt').value);
-  const accountId = document.getElementById('loanRepayAcc').value;
-  if(!amount || amount<=0){ toast('Enter a valid amount'); return; }
-  const acc = getAcc(accountId);
-  if(acc.type==='credit') acc.balance -= amount;
-  else acc.balance += amount;
-  l.repaid += amount;
-  // DO NOT auto-close
-  db.transactions.push({id:uid(), type:'repay_in', amount, date:todayISO(), note:'', accountId, person:l.person, loanId:l.id, createdAt:Date.now()});
-  save(); closeSheet(); renderAll();
-  toast('Repayment recorded');
-}
-function markLoanClosed(id){
-  const l = db.loans.find(x=>x.id===id);
-  l.closed = true; l.repaid = l.principal;
-  save(); closeSheet(); renderAll();
-  toast('Marked as settled');
-}
-function deleteLoan(id){
-  db.loans = db.loans.filter(l=>l.id!==id);
-  db.transactions = db.transactions.filter(t=>t.loanId!==id);
-  save(); closeSheet(); renderAll();
-  toast('Loan record deleted');
-}
-
-/* ===================== CLOUD SYNC (Firebase) — mandatory login gate ===================== */
-let cloudEnabled = false;
-let auth = null, dbCloud = null, currentUser = null;
-let pushTimer = null;
-
-function initCloud(){
-  const cfg = window.FIREBASE_CONFIG;
-  if(!cfg || !cfg.apiKey){
-    setSyncBadge('Backup off', false);
-    showApp(true);
-    return;
-  }
-  if(typeof firebase === 'undefined'){
-    console.error('Firebase SDK did not load; running in local-only mode.');
-    setSyncBadge('Backup unavailable', false);
-    showApp(true);
-    return;
-  }
-  try{
-    cloudEnabled = true;
-    firebase.initializeApp(cfg);
-    auth = firebase.auth();
-    dbCloud = firebase.firestore();
-
-    auth.onAuthStateChanged(async (user)=>{
-      currentUser = user;
-      if(user){
-        showApp(true);
-        setSyncBadge('Syncing…', true);
-        await cloudPull();
-        setSyncBadge('Backed up ✓', true);
-      } else {
-        showApp(false);
-      }
-    });
-  }catch(e){
-    console.error('Firebase init failed', e);
-    setSyncBadge('Backup unavailable', false);
-    showApp(true);
-  }
-}
-
-function showApp(show){
-  document.getElementById('appRoot').classList.toggle('hidden', !show);
-  document.getElementById('authGate').classList.toggle('hidden', show);
-}
-
-function setSyncBadge(text, signedIn){
-  const b = document.getElementById('syncBadge');
-  if(!b) return;
-  b.textContent = text;
-  b.className = 'badge ' + (signedIn ? 'closed' : 'open');
-}
-
-function docRef(){
-  return dbCloud.collection('users').doc(currentUser.uid).collection('ledger').doc('data');
-}
-
-async function cloudPull(){
-  try{
-    const snap = await docRef().get();
-    if(snap.exists){
-      const cloud = snap.data();
-      db = { accounts: cloud.accounts||[], transactions: cloud.transactions||[], loans: cloud.loans||[], people: cloud.people||[] };
-      localStorage.setItem(DB_KEY, JSON.stringify(db));
-      renderAll();
-    } else {
-      await cloudPush(true);
-    }
-  }catch(e){ console.error('Cloud pull failed', e); }
-}
-
-function cloudPush(immediate){
-  if(!cloudEnabled || !currentUser) return;
-  clearTimeout(pushTimer);
-  const doPush = async ()=>{
-    try{
-      setSyncBadge('Syncing…', true);
-      await docRef().set({ ...db, updatedAt: Date.now() });
-      setSyncBadge('Backed up ✓', true);
-    }catch(e){
-      console.error('Cloud push failed', e);
-      setSyncBadge('Backup failed — tap', true);
-    }
-  };
-  if(immediate) doPush(); else pushTimer = setTimeout(doPush, 1200);
-}
-
-function openSyncSheet(){
-  if(!cloudEnabled){
-    openSheet(`
-      <h3>Login not set up yet</h3>
-      <p style="color:var(--text-dim);font-size:14px;">
-        Add your Firebase project keys to <b>firebase-config.js</b> to require
-        sign-in before anyone can open this app, and to back up your data
-        automatically. See the README for the 5-minute setup.
-      </p>
-    `);
-    return;
-  }
-  openSheet(`
-    <h3>Account</h3>
-    <p style="color:var(--text-dim);font-size:14px;">Signed in as <b>${escapeHtml(currentUser.email)}</b>.</p>
-    <button class="btn-secondary" onclick="cloudSignOut()">Sign out</button>
-  `);
-}
-
-async function cloudSignIn(fromGate){
-  const emailEl = document.getElementById(fromGate ? 'gateEmail' : 'authEmail');
-  const pwEl = document.getElementById(fromGate ? 'gatePw' : 'authPw');
-  const email = emailEl.value.trim();
-  const pw = pwEl.value;
-  try{
-    await auth.signInWithEmailAndPassword(email, pw);
-    if(!fromGate) closeSheet();
-    setGateError('');
-    toast('Signed in');
-  }catch(e){ fromGate ? setGateError(e.message) : toast(e.message); }
-}
-async function cloudSignUp(fromGate){
-  const emailEl = document.getElementById(fromGate ? 'gateEmail' : 'authEmail');
-  const pwEl = document.getElementById(fromGate ? 'gatePw' : 'authPw');
-  const email = emailEl.value.trim();
-  const pw = pwEl.value;
-  try{
-    await auth.createUserWithEmailAndPassword(email, pw);
-    if(!fromGate) closeSheet();
-    setGateError('');
-    toast('Account created');
-  }catch(e){ fromGate ? setGateError(e.message) : toast(e.message); }
-}
-function setGateError(msg){
-  const el = document.getElementById('gateError');
-  if(el) el.textContent = msg;
-}
-function cloudSignOut(){
-  auth.signOut();
-  closeSheet();
-}
-
-/* ===================== INIT ===================== */
-window.addEventListener('DOMContentLoaded', ()=>{
-  document.querySelectorAll('.tab').forEach(b=> b.onclick = ()=> setTab(b.dataset.tab));
-  document.getElementById('fab').onclick = openAddTxSheet;
-  document.getElementById('addAccountBtn').onclick = openAddAccountSheet;
-  document.getElementById('addPersonBtn').onclick = openAddPersonSheet;
-  document.getElementById('txFilter').onchange = renderTransactions;
-  document.getElementById('todayDate').textContent = new Date().toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short'});
-  document.getElementById('syncBadge').onclick = openSyncSheet;
-  setTab('dashboard');
-  initCloud();
-  setTimeout(()=>{
-    const root = document.getElementById('appRoot');
-    const gate = document.getElementById('authGate');
-    if(root.classList.contains('hidden') && gate.classList.contains('hidden')){
-      console.warn('Cloud sign-in check timed out; opening app in local-only mode.');
-      setSyncBadge('Backup unavailable', false);
-      showApp(true);
-    }
-  }, 6000);
-
-  if('serviceWorker' in navigator){
-    navigator.serviceWorker.register('service-worker.js').catch(()=>{});
-  }
-});
+    const from = getAcc(accountId), to = getAcc
