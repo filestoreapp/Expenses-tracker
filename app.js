@@ -211,7 +211,7 @@ function renderTransactions(){
   });
 }
 
-/* ===================== RENDER: LENDING (People, like an accounts list) ===================== */
+/* ===================== RENDER: LENDING ===================== */
 function allPeopleGrouped(){
   const map = {};
   db.people.forEach(p=>{
@@ -406,7 +406,7 @@ function renderAll(){
   if(activeTab==='lending') renderLending();
 }
 
-/* ===================== SHEETS (MODALS) ===================== */
+/* ===================== SHEETS ===================== */
 function openSheet(html){
   const backdrop = document.createElement('div');
   backdrop.className='sheet-backdrop';
@@ -430,7 +430,7 @@ function fillAccountSelects(){
   });
 }
 
-/* ---------- ADD ACCOUNT ---------- */
+/* ===================== ADD ACCOUNT ===================== */
 function openAddAccountSheet(){
   openSheet(`
     <h3>Add account</h3>
@@ -578,7 +578,7 @@ function applyRepaymentToPerson(rawPerson, amount, accountId, date, note) {
   });
 }
 
-/* ---------- ADD TRANSACTION ---------- */
+/* ===================== ADD TRANSACTION ===================== */
 const TX_TYPES = [
   {k:'expense', label:'Expense'},
   {k:'income', label:'Income'},
@@ -613,10 +613,8 @@ function openAddTxSheet(){
 }
 function renderTxForm(type){
   const body = document.getElementById('txFormBody');
-  const accOptions = (withCredit=true)=> {
-    let accounts = db.accounts;
-    if(!withCredit) accounts = accounts.filter(a=>a.type!=='credit');
-    return `<select class="acc-select" id="txAccount">${accounts.map(a=>`<option value="${a.id}">${accIcon(a.type)} ${escapeHtml(a.name)}</option>`).join('')}</select>`;
+  const accOptions = ()=> {
+    return `<select class="acc-select" id="txAccount">${db.accounts.map(a=>`<option value="${a.id}">${accIcon(a.type)} ${escapeHtml(a.name)}</option>`).join('')}</select>`;
   };
   let extra='';
   if(type==='expense'){
@@ -693,4 +691,11 @@ function saveTx(type){
     const accountId = document.getElementById('txAccount').value;
     const toAccountId = document.getElementById('txToAccount').value;
     if(accountId===toAccountId){ toast('Choose two different accounts'); return; }
-    const from = getAcc(accountId), to = getAcc
+    const from = getAcc(accountId), to = getAcc(toAccountId);
+    if(from.type==='credit') from.balance += amount;
+    else from.balance -= amount;
+    if(to.type==='credit') to.balance -= amount;
+    else to.balance += amount;
+    db.transactions.push({...base, accountId, toAccountId});
+  } else if(type==='lend'){
+    const accountId = document.getElementById('txAccount').value
