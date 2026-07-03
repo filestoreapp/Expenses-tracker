@@ -45,9 +45,6 @@ function accIcon(type){ return (ACC_TYPES.find(t=>t.k===type)||{}).icon || '💰
 function accLabel(type){ return (ACC_TYPES.find(t=>t.k===type)||{}).label || type; }
 function getAcc(id){ return db.accounts.find(a=>a.id===id); }
 
-/** Looks up an existing person by name (case/space-insensitive); creates
- *  one if not found. Returns the canonical stored name, so typos like
- *  "arun " vs "Arun" always collapse to one person. */
 function getOrCreatePerson(rawName){
   const name = (rawName||'').trim();
   if(!name) return 'Unknown';
@@ -228,7 +225,7 @@ function allPeopleGrouped(){
   return Object.values(map).map(g=>{
     const totalPrincipal = g.loans.reduce((s,l)=>s+l.principal,0);
     const totalRepaid = g.loans.reduce((s,l)=>s+l.repaid,0);
-    const outstanding = g.loans.filter(l=>!l.closed).reduce((s,l)=>s+(l.principal-l.repaid),0);
+    const outstanding = g.loans.reduce((s,l)=>s+(l.principal-l.repaid),0);
     const allClosed = g.loans.length>0 && g.loans.every(l=>l.closed);
     const lastDate = g.loans.reduce((max,l)=> l.date>max?l.date:max, '0000-00-00');
     return { ...g, totalPrincipal, totalRepaid, outstanding, allClosed, hasLoans: g.loans.length>0, lastDate };
@@ -249,17 +246,20 @@ function renderLending(){
   groups.forEach(g=>{
     const div = document.createElement('div');
     div.className='row';
+    const isDebt = g.outstanding < 0;
     const statusBadge = g.hasLoans ? `<span class="badge ${g.allClosed?'closed':'open'}">${g.allClosed?'Settled':'Open'}</span>` : `<span class="badge">No loans yet</span>`;
     const subLine = g.hasLoans
       ? `${g.loans.length} loan${g.loans.length>1?'s':''} · lent ${fmt(g.totalPrincipal)} total${g.totalRepaid>0?' · repaid '+fmt(g.totalRepaid):''}`
       : 'Tap to record a lend for them';
+    const amtClass = isDebt ? 'debt' : (g.allClosed || !g.hasLoans ? 'pos' : 'neg');
+    const amtText = isDebt ? `You owe ${fmt(-g.outstanding)}` : (g.hasLoans ? (g.allClosed?'Settled':fmt(g.outstanding)) : '');
     div.innerHTML = `
       <div class="icon">🤝</div>
       <div class="mid">
         <div class="t1">${escapeHtml(g.display)} ${statusBadge}</div>
         <div class="t2">${subLine}</div>
       </div>
-      <div class="amt ${g.allClosed || !g.hasLoans ?'pos':'neg'}">${g.hasLoans ? (g.allClosed?'Settled':fmt(g.outstanding)) : ''}</div>
+      <div class="amt ${amtClass}">${amtText}</div>
     `;
     div.onclick = ()=> openPersonDetail(g.key);
     wrap.appendChild(div);
@@ -288,28 +288,44 @@ function openPersonDetail(key){
     .filter(t=> (t.type==='lend'||t.type==='purchase_for_other'||t.type==='repay_in') && personKey(t.person)===key)
     .sort((a,b)=> b.date.localeCompare(a.date) || b.createdAt-a.createdAt);
   const openLoans = g.loans.filter(l=>!l.closed);
+  const isDebt = g.outstanding < 0;
+
+  let paybackSection = '';
+  if(isDebt){
+    paybackSection = `
+      <div class="field"><label>Pay back (reduce debt)</label><input id="personPaybackAmt" type="number" placeholder="Amount to pay"></div>
+      <div class="field"><label>From account</label><select class="acc-select" id="personPaybackAcc"></select></div>
+      <button class="btn-primary" onclick="recordPayback('${key}')">Pay back</button>
+    `;
+  }
+
+  let repaySection = '';
+  if(openLoans.some(l => (l.principal - l.repaid) > 0)){
+    repaySection = `
+      <div class="field"><label>Record a repayment</label><input id="personRepayAmt" type="number" placeholder="Amount received"></div>
+      <div class="field"><label>Into account</label><select class="acc-select" id="personRepayAcc"></select></div>
+      <div class="field"><label>Applies to which loan</label>
+        <select id="personRepayLoan">
+          ${openLoans.filter(l => (l.principal - l.repaid) > 0).map(l=>`<option value="${l.id}">${fmtDate(l.date)} · ${fmt(l.principal-l.repaid)} remaining</option>`).join('')}
+        </select>
+      </div>
+      <button class="btn-primary" onclick="recordPersonRepay('${key}')">Record repayment</button>
+    `;
+  }
 
   openSheet(`
     <h3>🤝 ${escapeHtml(g.display)}</h3>
     <div class="hero" style="padding:16px;margin-bottom:14px;">
-      <div class="label">Outstanding</div>
-      <div class="amount">${g.hasLoans ? (g.allClosed?'Settled ✅':fmt(g.outstanding)) : fmt(0)}</div>
+      <div class="label">${isDebt ? 'You owe' : 'Outstanding'}</div>
+      <div class="amount ${isDebt ? 'debt' : ''}">${isDebt ? fmt(-g.outstanding) : (g.hasLoans ? (g.allClosed?'Settled ✅':fmt(g.outstanding)) : fmt(0))}</div>
       <div class="sub">
         <div>Total lent<span class="val">${fmt(g.totalPrincipal)}</span></div>
         <div>Total repaid<span class="val">${fmt(g.totalRepaid)}</span></div>
       </div>
     </div>
 
-    ${openLoans.length>0 ? `
-    <div class="field"><label>Record a repayment</label><input id="personRepayAmt" type="number" placeholder="Amount received"></div>
-    <div class="field"><label>Into account</label><select class="acc-select" id="personRepayAcc"></select></div>
-    <div class="field"><label>Applies to which loan</label>
-      <select id="personRepayLoan">
-        ${openLoans.map(l=>`<option value="${l.id}">${fmtDate(l.date)} · ${fmt(l.principal-l.repaid)} remaining</option>`).join('')}
-      </select>
-    </div>
-    <button class="btn-primary" onclick="recordPersonRepay('${key}')">Record repayment</button>
-    ` : ''}
+    ${repaySection}
+    ${paybackSection}
 
     <div class="section-head" style="margin-top:18px;"><h2>History</h2></div>
     <div class="tape" id="personHistoryList"></div>
@@ -328,6 +344,7 @@ function openPersonDetail(key){
     history.forEach(tx=> histWrap.appendChild(txRow(tx)));
   }
 }
+
 function recordPersonRepay(key){
   const amount = parseFloat(document.getElementById('personRepayAmt').value);
   const accountId = document.getElementById('personRepayAcc').value;
@@ -335,22 +352,39 @@ function recordPersonRepay(key){
   if(!amount || amount<=0){ toast('Enter a valid amount'); return; }
   const l = db.loans.find(x=>x.id===loanId);
   if(!l) return;
-  getAcc(accountId).balance += amount;
+  const acc = getAcc(accountId);
+  if(acc.type==='credit') acc.balance -= amount;
+  else acc.balance += amount;
   l.repaid += amount;
-  if(l.repaid >= l.principal) l.closed = true;
+  // No auto-close
   db.transactions.push({id:uid(), type:'repay_in', amount, date:todayISO(), note:'', accountId, person:l.person, loanId:l.id, createdAt:Date.now()});
   save(); closeSheet(); renderAll();
   toast('Repayment recorded');
   openPersonDetail(key);
 }
+
+function recordPayback(key){
+  const amount = parseFloat(document.getElementById('personPaybackAmt').value);
+  const accountId = document.getElementById('personPaybackAcc').value;
+  if(!amount || amount<=0){ toast('Enter a valid amount'); return; }
+  const personName = db.people.find(p=>personKey(p.name)===key)?.name || key;
+  const acc = getAcc(accountId);
+  if(acc.type==='credit') acc.balance += amount;
+  else acc.balance -= amount;
+  const loanId = uid();
+  db.loans.push({id:loanId, person:personName, principal:amount, repaid:0, date:todayISO(), notes:'Payback (debt repayment)', closed:false});
+  db.transactions.push({id:uid(), type:'lend', amount, date:todayISO(), note:'Payback', accountId, person:personName, loanId});
+  save(); closeSheet(); renderAll();
+  toast('Payback recorded');
+  openPersonDetail(key);
+}
+
 function renamePerson(oldKey){
   const newName = document.getElementById('personRenameInput').value.trim();
   if(!newName){ toast('Enter a name'); return; }
   const newKey = personKey(newName);
-  // Update (or create) the person's directory entry
   let p = db.people.find(x=>personKey(x.name)===oldKey);
   if(p) p.name = newName; else db.people.push({id:uid(), name:newName});
-  // Cascade the rename across historical loans and transactions
   db.loans.forEach(l=>{ if(personKey(l.person)===oldKey) l.person = newName; });
   db.transactions.forEach(t=>{ if(t.person && personKey(t.person)===oldKey) t.person = newName; });
   save(); closeSheet(); renderAll();
@@ -509,7 +543,11 @@ function openAddTxSheet(){
 }
 function renderTxForm(type){
   const body = document.getElementById('txFormBody');
-  const accOptions = ()=> `<select class="acc-select" id="txAccount"></select>`;
+  const accOptions = (withCredit=true)=> {
+    let accounts = db.accounts;
+    if(!withCredit) accounts = accounts.filter(a=>a.type!=='credit');
+    return `<select class="acc-select" id="txAccount">${accounts.map(a=>`<option value="${a.id}">${accIcon(a.type)} ${escapeHtml(a.name)}</option>`).join('')}</select>`;
+  };
   let extra='';
   if(type==='expense'){
     extra = `
@@ -532,7 +570,7 @@ function renderTxForm(type){
       <div class="field"><label>Card / account used</label>${accOptions()}</div>
       <div class="field"><label>Person's name</label><input id="txPerson" list="peopleDatalist" placeholder="Who is this for?"></div>`;
   } else if(type==='repay_in'){
-    const openLoans = db.loans.filter(l=>!l.closed);
+    const openLoans = db.loans.filter(l=>!l.closed && (l.principal - l.repaid) > 0);
     extra = `
       <div class="field"><label>Into account</label>${accOptions()}</div>
       <div class="field"><label>From person (optional loan link)</label>
@@ -557,6 +595,76 @@ function renderTxForm(type){
     };
   }
 }
+
+/* ===================== NEW: Smart repayment distributor ===================== */
+function applyRepaymentToPerson(rawPerson, amount, accountId, date, note) {
+  const person = getOrCreatePerson(rawPerson);
+  const personKeyVal = personKey(person);
+
+  // Get all open loans (not fully repaid, not marked closed) for this person
+  let openLoans = db.loans.filter(l => 
+    personKey(l.person) === personKeyVal && 
+    !l.closed && 
+    l.repaid < l.principal
+  );
+  // Sort oldest first (FIFO)
+  openLoans.sort((a, b) => a.date.localeCompare(b.date));
+
+  let remaining = amount;
+
+  for (let loan of openLoans) {
+    let outstanding = loan.principal - loan.repaid;
+    if (remaining <= outstanding) {
+      loan.repaid += remaining;
+      if (loan.repaid >= loan.principal) loan.closed = true;
+      remaining = 0;
+      break;
+    } else {
+      remaining -= outstanding;
+      loan.repaid = loan.principal;
+      loan.closed = true;
+    }
+  }
+
+  // If there's still remaining money after clearing all open loans
+  if (remaining > 0) {
+    // Apply excess to the most recent loan (to create a negative balance / debt)
+    // If there are loans, pick the last one in the sorted list (which is the most recent)
+    let targetLoan = null;
+    if (openLoans.length > 0) {
+      targetLoan = openLoans[openLoans.length - 1];
+      targetLoan.repaid += remaining;
+      targetLoan.closed = false; // Keep it open to show debt
+    } else {
+      // No loans at all (rare case), create a dummy loan to hold the debt
+      targetLoan = {
+        id: uid(),
+        person: person,
+        principal: 0,
+        repaid: remaining,
+        date: date,
+        notes: note || 'Over-repayment (debt)',
+        closed: false
+      };
+      db.loans.push(targetLoan);
+    }
+  }
+
+  // Record the transaction
+  db.transactions.push({
+    id: uid(),
+    type: 'repay_in',
+    amount: amount,
+    date: date,
+    note: note || '',
+    accountId: accountId,
+    person: person,
+    loanId: null,
+    createdAt: Date.now()
+  });
+}
+
+/* ===================== SAVE TX (updated repay_in case) ===================== */
 function saveTx(type){
   const amount = parseFloat(document.getElementById('txAmount').value);
   if(!amount || amount<=0){ toast('Enter a valid amount'); return; }
@@ -572,15 +680,19 @@ function saveTx(type){
     db.transactions.push({...base, accountId, category});
   } else if(type==='income'){
     const accountId = document.getElementById('txAccount').value;
-    getAcc(accountId).balance += amount;
+    const acc = getAcc(accountId);
+    if(acc.type==='credit') acc.balance -= amount;
+    else acc.balance += amount;
     db.transactions.push({...base, accountId});
   } else if(type==='transfer'){
     const accountId = document.getElementById('txAccount').value;
     const toAccountId = document.getElementById('txToAccount').value;
     if(accountId===toAccountId){ toast('Choose two different accounts'); return; }
     const from = getAcc(accountId), to = getAcc(toAccountId);
-    if(from.type==='credit') from.balance -= amount; else from.balance -= amount;
-    if(to.type==='credit') to.balance -= amount; else to.balance += amount;
+    if(from.type==='credit') from.balance += amount;
+    else from.balance -= amount;
+    if(to.type==='credit') to.balance -= amount;
+    else to.balance += amount;
     db.transactions.push({...base, accountId, toAccountId});
   } else if(type==='lend'){
     const accountId = document.getElementById('txAccount').value;
@@ -601,18 +713,31 @@ function saveTx(type){
   } else if(type==='repay_in'){
     const accountId = document.getElementById('txAccount').value;
     const loanId = document.getElementById('txLoanLink').value;
-    let person = '';
-    getAcc(accountId).balance += amount;
+    const acc = getAcc(accountId);
+    if(acc.type==='credit') acc.balance -= amount;
+    else acc.balance += amount;
+
     if(loanId){
+      // Linked to a specific loan – simple update
       const loan = db.loans.find(l=>l.id===loanId);
-      loan.repaid += amount;
-      person = loan.person;
-      if(loan.repaid >= loan.principal) loan.closed = true;
+      if(loan){
+        loan.repaid += amount;
+        // No auto-close
+        db.transactions.push({...base, accountId, person:loan.person, loanId});
+      } else {
+        toast('Loan not found');
+        return;
+      }
     } else {
-      const typed = document.getElementById('txPerson') ? document.getElementById('txPerson').value : '';
-      person = typed ? getOrCreatePerson(typed) : '';
+      // General repayment – use the smart distributor
+      const personName = document.getElementById('txPerson') ? document.getElementById('txPerson').value.trim() : '';
+      if(!personName){ toast('Enter the person\'s name'); return; }
+      applyRepaymentToPerson(personName, amount, accountId, date, note);
+      // The transaction is already pushed inside applyRepaymentToPerson, so we skip pushing again.
+      save(); closeSheet(); renderAll();
+      toast('Saved');
+      return;
     }
-    db.transactions.push({...base, accountId, person, loanId: loanId||null});
   }
   save(); closeSheet(); renderAll();
   toast('Saved');
@@ -634,16 +759,16 @@ function openTxDetail(id){
 function deleteTx(id){
   const tx = db.transactions.find(t=>t.id===id);
   if(!tx) return;
-  // reverse the balance effect
+  // reverse the balance effect (with corrected logic)
   if(tx.type==='expense'){
     const acc = getAcc(tx.accountId);
     if(acc) acc.type==='credit' ? acc.balance-=tx.amount : acc.balance+=tx.amount;
   } else if(tx.type==='income'){
     const acc = getAcc(tx.accountId);
-    if(acc) acc.balance -= tx.amount;
+    if(acc) acc.type==='credit' ? acc.balance+=tx.amount : acc.balance-=tx.amount;
   } else if(tx.type==='transfer'){
     const from = getAcc(tx.accountId), to = getAcc(tx.toAccountId);
-    if(from) from.balance += tx.amount;
+    if(from) from.type==='credit' ? from.balance-=tx.amount : from.balance+=tx.amount;
     if(to) to.type==='credit' ? to.balance+=tx.amount : to.balance-=tx.amount;
   } else if(tx.type==='lend' || tx.type==='purchase_for_other'){
     const acc = getAcc(tx.accountId);
@@ -653,10 +778,10 @@ function deleteTx(id){
     }
   } else if(tx.type==='repay_in'){
     const acc = getAcc(tx.accountId);
-    if(acc) acc.balance -= tx.amount;
+    if(acc) acc.type==='credit' ? acc.balance+=tx.amount : acc.balance-=tx.amount;
     if(tx.loanId){
       const loan = db.loans.find(l=>l.id===tx.loanId);
-      if(loan){ loan.repaid -= tx.amount; loan.closed=false; }
+      if(loan){ loan.repaid -= tx.amount; /* no auto-close */ }
     }
   }
   db.transactions = db.transactions.filter(t=>t.id!==id);
@@ -669,11 +794,12 @@ function openLoanDetail(id){
   const l = db.loans.find(x=>x.id===id);
   if(!l) return;
   const remaining = l.principal - l.repaid;
+  const isDebt = remaining < 0;
   openSheet(`
     <h3>🤝 ${escapeHtml(l.person)}</h3>
     <div class="hero" style="padding:16px;margin-bottom:14px;">
-      <div class="label">Outstanding</div>
-      <div class="amount">${l.closed?'Settled ✅':fmt(remaining)}</div>
+      <div class="label">${isDebt ? 'You owe' : 'Outstanding'}</div>
+      <div class="amount ${isDebt?'debt':''}">${l.closed?'Settled ✅': (isDebt ? fmt(-remaining) : fmt(remaining))}</div>
       <div class="sub">
         <div>Lent<span class="val">${fmt(l.principal)}</span></div>
         <div>Repaid<span class="val">${fmt(l.repaid)}</span></div>
@@ -695,9 +821,11 @@ function recordLoanRepay(id){
   const amount = parseFloat(document.getElementById('loanRepayAmt').value);
   const accountId = document.getElementById('loanRepayAcc').value;
   if(!amount || amount<=0){ toast('Enter a valid amount'); return; }
-  getAcc(accountId).balance += amount;
+  const acc = getAcc(accountId);
+  if(acc.type==='credit') acc.balance -= amount;
+  else acc.balance += amount;
   l.repaid += amount;
-  if(l.repaid >= l.principal) l.closed = true;
+  // DO NOT auto-close
   db.transactions.push({id:uid(), type:'repay_in', amount, date:todayISO(), note:'', accountId, person:l.person, loanId:l.id, createdAt:Date.now()});
   save(); closeSheet(); renderAll();
   toast('Repayment recorded');
@@ -723,14 +851,11 @@ let pushTimer = null;
 function initCloud(){
   const cfg = window.FIREBASE_CONFIG;
   if(!cfg || !cfg.apiKey){
-    // No Firebase configured: app runs local-only, no login wall.
     setSyncBadge('Backup off', false);
     showApp(true);
     return;
   }
   if(typeof firebase === 'undefined'){
-    // Firebase SDK scripts failed to load (offline / blocked / CDN issue).
-    // Fail open to local-only mode rather than leaving a blank screen.
     console.error('Firebase SDK did not load; running in local-only mode.');
     setSyncBadge('Backup unavailable', false);
     showApp(true);
@@ -750,7 +875,7 @@ function initCloud(){
         await cloudPull();
         setSyncBadge('Backed up ✓', true);
       } else {
-        showApp(false); // lock the app behind sign-in
+        showApp(false);
       }
     });
   }catch(e){
@@ -785,7 +910,7 @@ async function cloudPull(){
       localStorage.setItem(DB_KEY, JSON.stringify(db));
       renderAll();
     } else {
-      await cloudPush(true); // first sign-in on this account: push local data up
+      await cloudPush(true);
     }
   }catch(e){ console.error('Cloud pull failed', e); }
 }
@@ -825,8 +950,6 @@ function openSyncSheet(){
   `);
 }
 
-/* fromGate: true when called from the full-screen lock wall, false when
-   called from inside the app's own account sheet. */
 async function cloudSignIn(fromGate){
   const emailEl = document.getElementById(fromGate ? 'gateEmail' : 'authEmail');
   const pwEl = document.getElementById(fromGate ? 'gatePw' : 'authPw');
@@ -871,9 +994,6 @@ window.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('syncBadge').onclick = openSyncSheet;
   setTab('dashboard');
   initCloud();
-  // Safety net: if nothing has shown the app or the gate within 6s
-  // (e.g. Firebase hanging on a slow/blocked connection), fail open
-  // to local-only mode so the person is never stuck on a blank screen.
   setTimeout(()=>{
     const root = document.getElementById('appRoot');
     const gate = document.getElementById('authGate');
