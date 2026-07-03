@@ -698,4 +698,331 @@ function saveTx(type){
     else to.balance += amount;
     db.transactions.push({...base, accountId, toAccountId});
   } else if(type==='lend'){
-    const accountId = document.getElementById('txAccount').value
+    const accountId = document.getElementById('txAccount').value;
+    const person = getOrCreatePerson(document.getElementById('txPerson').value);
+    const acc = getAcc(accountId);
+    if(acc.type==='credit') acc.balance += amount; else acc.balance -= amount;
+    const loanId = uid();
+    db.loans.push({id:loanId, person, principal:amount, repaid:0, date, notes:note, closed:false});
+    db.transactions.push({...base, accountId, person, loanId});
+  } else if(type==='purchase_for_other'){
+    const accountId = document.getElementById('txAccount').value;
+    const person = getOrCreatePerson(document.getElementById('txPerson').value);
+    const acc = getAcc(accountId);
+    if(acc.type==='credit') acc.balance += amount; else acc.balance -= amount;
+    const loanId = uid();
+    db.loans.push({id:loanId, person, principal:amount, repaid:0, date, notes:'Paid on their behalf: '+note, closed:false});
+    db.transactions.push({...base, accountId, person, loanId});
+  } else if(type==='repay_in'){
+    const accountId = document.getElementById('txAccount').value;
+    const loanId = document.getElementById('txLoanLink').value;
+    const acc = getAcc(accountId);
+    if(acc.type==='credit') acc.balance -= amount;
+    else acc.balance += amount;
+
+    if(loanId){
+      // Linked to a specific loan – simple update
+      const loan = db.loans.find(l=>l.id===loanId);
+      if(loan){
+        loan.repaid += amount;
+        // No auto-close
+        db.transactions.push({...base, accountId, person:loan.person, loanId});
+      } else {
+        toast('Loan not found');
+        return;
+      }
+    } else {
+      // General repayment – use the smart distributor
+      const personName = document.getElementById('txPerson') ? document.getElementById('txPerson').value.trim() : '';
+      if(!personName){ toast('Enter the person\'s name'); return; }
+      applyRepaymentToPerson(personName, amount, accountId, date, note);
+      // The transaction is already pushed inside applyRepaymentToPerson, so we skip pushing again.
+      save(); closeSheet(); renderAll();
+      toast('Saved');
+      return;
+    }
+  }
+  save(); closeSheet(); renderAll();
+  toast('Saved');
+}
+
+function openTxDetail(id){
+  const tx = db.transactions.find(t=>t.id===id);
+  if(!tx) return;
+  openSheet(`
+    <h3>${escapeHtml(txTitle(tx))}</h3>
+    <p style="color:var(--text-dim);font-size:13px;margin:0 0 14px;">${fmtDate(tx.date)} · ${escapeHtml(txSub(tx))}</p>
+    <div class="hero" style="padding:16px;margin-bottom:14px;">
+      <div class="amount">${fmt(tx.amount)}</div>
+    </div>
+    ${tx.note ? `<p style="font-size:14px;color:var(--text-dim);">Note: ${escapeHtml(tx.note)}</p>` : ''}
+    <button class="btn-secondary btn-danger" onclick="deleteTx('${id}')">Delete transaction</button>
+  `);
+}
+function deleteTx(id){
+  const tx = db.transactions.find(t=>t.id===id);
+  if(!tx) return;
+  // reverse the balance effect (with corrected logic)
+  if(tx.type==='expense'){
+    const acc = getAcc(tx.accountId);
+    if(acc) acc.type==='credit' ? acc.balance-=tx.amount : acc.balance+=tx.amount;
+  } else if(tx.type==='income'){
+    const acc = getAcc(tx.accountId);
+    if(acc) acc.type==='credit' ? acc.balance+=tx.amount : acc.balance-=tx.amount;
+  } else if(tx.type==='transfer'){
+    const from = getAcc(tx.accountId), to = getAcc(tx.toAccountId);
+    if(from) from.type==='credit' ? from.balance-=tx.amount : from.balance+=tx.amount;
+    if(to) to.type==='credit' ? to.balance+=tx.amount : to.balance-=tx.amount;
+  } else if(tx.type==='lend' || tx.type==='purchase_for_other'){
+    const acc = getAcc(tx.accountId);
+    if(acc) acc.type==='credit' ? acc.balance-=tx.amount : acc.balance+=tx.amount;
+    if(tx.loanId){
+      db.loans = db.loans.filter(l=>l.id!==tx.loanId);
+    }
+  } else if(tx.type==='repay_in'){
+    const acc = getAcc(tx.accountId);
+    if(acc) acc.type==='credit' ? acc.balance+=tx.amount : acc.balance-=tx.amount;
+    if(tx.loanId){
+      const loan = db.loans.find(l=>l.id===tx.loanId);
+      if(loan){ loan.repaid -= tx.amount; /* no auto-close */ }
+    }
+  }
+  db.transactions = db.transactions.filter(t=>t.id!==id);
+  save(); closeSheet(); renderAll();
+  toast('Transaction deleted');
+}
+
+/* ---------- LOAN DETAIL ---------- */
+function openLoanDetail(id){
+  const l = db.loans.find(x=>x.id===id);
+  if(!l) return;
+  const remaining = l.principal - l.repaid;
+  const isDebt = remaining < 0;
+  openSheet(`
+    <h3>🤝 ${escapeHtml(l.person)}</h3>
+    <div class="hero" style="padding:16px;margin-bottom:14px;">
+      <div class="label">${isDebt ? 'You owe' : 'Outstanding'}</div>
+      <div class="amount ${isDebt?'debt':''}">${l.closed?'Settled ✅': (isDebt ? fmt(-remaining) : fmt(remaining))}</div>
+      <div class="sub">
+        <div>Lent<span class="val">${fmt(l.principal)}</span></div>
+        <div>Repaid<span class="val">${fmt(l.repaid)}</span></div>
+        <div>Date<span class="val">${fmtDate(l.date)}</span></div>
+      </div>
+    </div>
+    ${!l.closed ? `
+    <div class="field"><label>Record a repayment</label><input id="loanRepayAmt" type="number" placeholder="Amount received"></div>
+    <div class="field"><label>Into account</label><select class="acc-select" id="loanRepayAcc"></select></div>
+    <button class="btn-primary" onclick="recordLoanRepay('${id}')">Record repayment</button>
+    <button class="btn-secondary" onclick="markLoanClosed('${id}')">Mark fully settled</button>
+    ` : ''}
+    <button class="btn-secondary btn-danger" onclick="deleteLoan('${id}')">Delete record</button>
+  `);
+  fillAccountSelects();
+}
+function recordLoanRepay(id){
+  const l = db.loans.find(x=>x.id===id);
+  const amount = parseFloat(document.getElementById('loanRepayAmt').value);
+  const accountId = document.getElementById('loanRepayAcc').value;
+  if(!amount || amount<=0){ toast('Enter a valid amount'); return; }
+  const acc = getAcc(accountId);
+  if(acc.type==='credit') acc.balance -= amount;
+  else acc.balance += amount;
+  l.repaid += amount;
+  // DO NOT auto-close
+  db.transactions.push({id:uid(), type:'repay_in', amount, date:todayISO(), note:'', accountId, person:l.person, loanId:l.id, createdAt:Date.now()});
+  save(); closeSheet(); renderAll();
+  toast('Repayment recorded');
+}
+function markLoanClosed(id){
+  const l = db.loans.find(x=>x.id===id);
+  l.closed = true; l.repaid = l.principal;
+  save(); closeSheet(); renderAll();
+  toast('Marked as settled');
+}
+function deleteLoan(id){
+  db.loans = db.loans.filter(l=>l.id!==id);
+  db.transactions = db.transactions.filter(t=>t.loanId!==id);
+  save(); closeSheet(); renderAll();
+  toast('Loan record deleted');
+}
+
+/* ===================== CLOUD SYNC ===================== */
+let cloudEnabled = false;
+let auth = null, dbCloud = null, currentUser = null;
+let pushTimer = null;
+
+function initCloud(){
+  const cfg = window.FIREBASE_CONFIG;
+  if(!cfg || !cfg.apiKey){
+    setSyncBadge('Backup off', false);
+    showApp(true);
+    return;
+  }
+  if(typeof firebase === 'undefined'){
+    console.error('Firebase SDK did not load; running in local-only mode.');
+    setSyncBadge('Backup unavailable', false);
+    showApp(true);
+    return;
+  }
+  try{
+    cloudEnabled = true;
+    firebase.initializeApp(cfg);
+    auth = firebase.auth();
+    dbCloud = firebase.firestore();
+
+    auth.onAuthStateChanged(async (user)=>{
+      currentUser = user;
+      if(user){
+        showApp(true);
+        setSyncBadge('Syncing…', true);
+        await cloudPull();
+        setSyncBadge('Backed up ✓', true);
+      } else {
+        showApp(false);
+      }
+    });
+  }catch(e){
+    console.error('Firebase init failed', e);
+    setSyncBadge('Backup unavailable', false);
+    showApp(true);
+  }
+}
+
+function showApp(show){
+  const appRoot = document.getElementById('appRoot');
+  const authGate = document.getElementById('authGate');
+  if(appRoot) appRoot.classList.toggle('hidden', !show);
+  if(authGate) authGate.classList.toggle('hidden', show);
+}
+
+function setSyncBadge(text, signedIn){
+  const b = document.getElementById('syncBadge');
+  if(!b) return;
+  b.textContent = text;
+  b.className = 'badge ' + (signedIn ? 'closed' : 'open');
+}
+
+function docRef(){
+  return dbCloud.collection('users').doc(currentUser.uid).collection('ledger').doc('data');
+}
+
+async function cloudPull(){
+  try{
+    const snap = await docRef().get();
+    if(snap.exists){
+      const cloud = snap.data();
+      db = { accounts: cloud.accounts||[], transactions: cloud.transactions||[], loans: cloud.loans||[], people: cloud.people||[] };
+      localStorage.setItem(DB_KEY, JSON.stringify(db));
+      renderAll();
+    } else {
+      await cloudPush(true);
+    }
+  }catch(e){ console.error('Cloud pull failed', e); }
+}
+
+function cloudPush(immediate){
+  if(!cloudEnabled || !currentUser) return;
+  clearTimeout(pushTimer);
+  const doPush = async ()=>{
+    try{
+      setSyncBadge('Syncing…', true);
+      await docRef().set({ ...db, updatedAt: Date.now() });
+      setSyncBadge('Backed up ✓', true);
+    }catch(e){
+      console.error('Cloud push failed', e);
+      setSyncBadge('Backup failed — tap', true);
+    }
+  };
+  if(immediate) doPush(); else pushTimer = setTimeout(doPush, 1200);
+}
+
+function openSyncSheet(){
+  if(!cloudEnabled){
+    openSheet(`
+      <h3>Login not set up yet</h3>
+      <p style="color:var(--text-dim);font-size:14px;">
+        Add your Firebase project keys to <b>firebase-config.js</b> to require
+        sign-in before anyone can open this app, and to back up your data
+        automatically. See the README for the 5-minute setup.
+      </p>
+    `);
+    return;
+  }
+  openSheet(`
+    <h3>Account</h3>
+    <p style="color:var(--text-dim);font-size:14px;">Signed in as <b>${escapeHtml(currentUser.email)}</b>.</p>
+    <button class="btn-secondary" onclick="cloudSignOut()">Sign out</button>
+  `);
+}
+
+async function cloudSignIn(fromGate){
+  const emailEl = document.getElementById(fromGate ? 'gateEmail' : 'authEmail');
+  const pwEl = document.getElementById(fromGate ? 'gatePw' : 'authPw');
+  const email = emailEl.value.trim();
+  const pw = pwEl.value;
+  try{
+    await auth.signInWithEmailAndPassword(email, pw);
+    if(!fromGate) closeSheet();
+    setGateError('');
+    toast('Signed in');
+  }catch(e){ fromGate ? setGateError(e.message) : toast(e.message); }
+}
+async function cloudSignUp(fromGate){
+  const emailEl = document.getElementById(fromGate ? 'gateEmail' : 'authEmail');
+  const pwEl = document.getElementById(fromGate ? 'gatePw' : 'authPw');
+  const email = emailEl.value.trim();
+  const pw = pwEl.value;
+  try{
+    await auth.createUserWithEmailAndPassword(email, pw);
+    if(!fromGate) closeSheet();
+    setGateError('');
+    toast('Account created');
+  }catch(e){ fromGate ? setGateError(e.message) : toast(e.message); }
+}
+function setGateError(msg){
+  const el = document.getElementById('gateError');
+  if(el) el.textContent = msg;
+}
+function cloudSignOut(){
+  auth.signOut();
+  closeSheet();
+}
+
+/* ===================== INIT ===================== */
+window.addEventListener('DOMContentLoaded', ()=>{
+  // Safety catch for any uncaught errors
+  try {
+    document.querySelectorAll('.tab').forEach(b=> b.onclick = ()=> setTab(b.dataset.tab));
+    const fab = document.getElementById('fab');
+    if(fab) fab.onclick = openAddTxSheet;
+    const addAccountBtn = document.getElementById('addAccountBtn');
+    if(addAccountBtn) addAccountBtn.onclick = openAddAccountSheet;
+    const addPersonBtn = document.getElementById('addPersonBtn');
+    if(addPersonBtn) addPersonBtn.onclick = openAddPersonSheet;
+    const txFilter = document.getElementById('txFilter');
+    if(txFilter) txFilter.onchange = renderTransactions;
+    const todayDate = document.getElementById('todayDate');
+    if(todayDate) todayDate.textContent = new Date().toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short'});
+    const syncBadge = document.getElementById('syncBadge');
+    if(syncBadge) syncBadge.onclick = openSyncSheet;
+    setTab('dashboard');
+    initCloud();
+    setTimeout(()=>{
+      const root = document.getElementById('appRoot');
+      const gate = document.getElementById('authGate');
+      if(root && gate && root.classList.contains('hidden') && gate.classList.contains('hidden')){
+        console.warn('Cloud sign-in check timed out; opening app in local-only mode.');
+        setSyncBadge('Backup unavailable', false);
+        showApp(true);
+      }
+    }, 6000);
+
+    if('serviceWorker' in navigator){
+      navigator.serviceWorker.register('service-worker.js').catch(()=>{});
+    }
+  } catch(e) {
+    console.error('Init error:', e);
+    // Show error on screen
+    document.body.innerHTML = `<div style="color:red;padding:20px;">Error: ${e.message}</div>`;
+  }
+});
